@@ -9,8 +9,42 @@ type ChatMessage = {
   content: string;
 };
 
+type SpeechRecognitionResultLike = {
+  readonly isFinal: boolean;
+  readonly 0: { transcript: string };
+};
+
+type SpeechRecognitionEventLike = {
+  readonly resultIndex: number;
+  readonly results: ArrayLike<SpeechRecognitionResultLike>;
+};
+
+type SpeechRecognitionLike = {
+  lang: string;
+  continuous: boolean;
+  interimResults: boolean;
+  onstart: ((this: SpeechRecognitionLike, ev: Event) => void) | null;
+  onresult: ((this: SpeechRecognitionLike, ev: SpeechRecognitionEventLike) => void) | null;
+  onerror: ((this: SpeechRecognitionLike, ev: { error: string }) => void) | null;
+  onend: ((this: SpeechRecognitionLike, ev: Event) => void) | null;
+  start: () => void;
+  stop: () => void;
+  abort: () => void;
+};
+
+type SpeechRecognitionConstructor = new () => SpeechRecognitionLike;
+
 function formatAmount(amount: number) {
   return new Intl.NumberFormat("ko-KR").format(amount);
+}
+
+function getSpeechRecognition(): SpeechRecognitionConstructor | null {
+  if (typeof window === "undefined") return null;
+  const w = window as Window & {
+    SpeechRecognition?: SpeechRecognitionConstructor;
+    webkitSpeechRecognition?: SpeechRecognitionConstructor;
+  };
+  return w.SpeechRecognition ?? w.webkitSpeechRecognition ?? null;
 }
 
 export default function Home() {
@@ -21,13 +55,27 @@ export default function Home() {
       id: "welcome",
       role: "assistant",
       content:
-        "안녕하세요! 지출을 기록하거나 통계를 물어보세요.\n예: 오늘 점심 12,000원\n예: 이번 달 총 지출이 얼마야?",
+        "안녕하세요! 지출을 기록하거나 통계를 물어보세요.\n예: 오늘 점심 12,000원\n예: 이번 달 총 지출이 얼마야?\n마이크 버튼으로 말로도 입력할 수 있어요.",
     },
   ]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
+  const [listening, setListening] = useState(false);
+  const [speechSupported, setSpeechSupported] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
+  const sendingRef = useRef(false);
+  const messagesRef = useRef(messages);
+  const transcriptRef = useRef("");
+
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+
+  useEffect(() => {
+    sendingRef.current = sending;
+  }, [sending]);
 
   async function loadExpenses() {
     const { data, error } = await supabase
@@ -43,16 +91,22 @@ export default function Home() {
 
   useEffect(() => {
     void loadExpenses();
+    setSpeechSupported(Boolean(getSpeechRecognition()));
   }, []);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, sending]);
+  }, [messages, sending, listening]);
 
-  async function handleSend(event?: FormEvent) {
-    event?.preventDefault();
-    const text = input.trim();
-    if (!text || sending) return;
+  useEffect(() => {
+    return () => {
+      recognitionRef.current?.abort();
+    };
+  }, []);
+
+  async function sendMessage(rawText: string) {
+    const text = rawText.trim();
+    if (!text || sendingRef.current) return;
 
     const userMessage: ChatMessage = {
       id: crypto.randomUUID(),
@@ -65,7 +119,7 @@ export default function Home() {
     setSending(true);
 
     try {
-      const history = messages
+      const history = messagesRef.current
         .filter((m) => m.id !== "welcome")
         .map(({ role, content }) => ({ role, content }));
 
@@ -114,6 +168,106 @@ export default function Home() {
       setSending(false);
       inputRef.current?.focus();
     }
+  }
+
+  function handleSend(event?: FormEvent) {
+    event?.preventDefault();
+    void sendMessage(input);
+  }
+
+  function pushSystemNotice(content: string) {
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: crypto.randomUUID(),
+        role: "assistant",
+        content,
+      },
+    ]);
+  }
+
+  function stopListening() {
+    recognitionRef.current?.stop();
+  }
+
+  function startListening() {
+    const SpeechRecognitionCtor = getSpeechRecognition();
+    if (!SpeechRecognitionCtor) {
+      pushSystemNotice("이 브라우저는 음성 인식을 지원하지 않아요. Chrome을 사용해 주세요.");
+      return;
+    }
+    if (sending || listening) return;
+
+    const recognition = new SpeechRecognitionCtor();
+    recognition.lang = "ko-KR";
+    recognition.continuous = false;
+    recognition.interimResults = true;
+    recognitionRef.current = recognition;
+    transcriptRef.current = "";
+
+    recognition.onstart = () => {
+      setListening(true);
+    };
+
+    recognition.onresult = (event) => {
+      let finalText = "";
+      let interim = "";
+      for (let i = 0; i < event.results.length; i += 1) {
+        const result = event.results[i];
+        const piece = result[0]?.transcript ?? "";
+        if (result.isFinal) {
+          finalText += piece;
+        } else {
+          interim += piece;
+        }
+      }
+      const combined = (finalText + interim).trim();
+      transcriptRef.current = combined;
+      setInput(combined);
+    };
+
+    recognition.onerror = (event) => {
+      setListening(false);
+      recognitionRef.current = null;
+
+      if (event.error === "not-allowed" || event.error === "service-not-allowed") {
+        pushSystemNotice("마이크 권한이 필요해요. 브라우저 설정에서 마이크를 허용해 주세요.");
+        return;
+      }
+      if (event.error === "no-speech") {
+        pushSystemNotice("음성이 감지되지 않았어요. 다시 마이크를 눌러 말해 주세요.");
+        return;
+      }
+      if (event.error === "aborted") return;
+
+      pushSystemNotice("음성 인식 중 문제가 발생했어요. 다시 시도해 주세요.");
+    };
+
+    recognition.onend = () => {
+      setListening(false);
+      recognitionRef.current = null;
+      const text = transcriptRef.current.trim();
+      transcriptRef.current = "";
+      if (text) {
+        void sendMessage(text);
+      }
+    };
+
+    try {
+      recognition.start();
+    } catch {
+      setListening(false);
+      recognitionRef.current = null;
+      pushSystemNotice("음성 인식을 시작할 수 없어요. 잠시 후 다시 시도해 주세요.");
+    }
+  }
+
+  function toggleListening() {
+    if (listening) {
+      stopListening();
+      return;
+    }
+    startListening();
   }
 
   async function removeExpense(id: number) {
@@ -198,6 +352,17 @@ export default function Home() {
               </div>
             ))}
 
+            {listening ? (
+              <div className="flex justify-start">
+                <div className="mr-2 mt-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-red-400 text-[11px] font-semibold text-white">
+                  MIC
+                </div>
+                <div className="rounded-2xl rounded-bl-md bg-white px-4 py-3 text-[14px] text-muted">
+                  듣고 있어요… 말씀해 주세요
+                </div>
+              </div>
+            ) : null}
+
             {sending ? (
               <div className="flex justify-start">
                 <div className="mr-2 mt-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-accent text-[11px] font-semibold text-white">
@@ -218,18 +383,53 @@ export default function Home() {
         className="mx-auto w-full max-w-xl shrink-0 px-3 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:px-4"
       >
         <div className="flex items-center gap-2 rounded-full bg-white px-2 py-2 shadow-[0_1px_0_rgba(0,0,0,0.04)]">
+          <button
+            type="button"
+            onClick={toggleListening}
+            disabled={sending || !speechSupported}
+            aria-pressed={listening}
+            aria-label={listening ? "음성 인식 중지" : "음성 인식 시작"}
+            title={
+              speechSupported
+                ? listening
+                  ? "녹음 중지"
+                  : "음성으로 입력"
+                : "이 브라우저는 음성 인식을 지원하지 않습니다"
+            }
+            className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+              listening
+                ? "bg-red-500 text-white hover:bg-red-600"
+                : "bg-surface text-foreground hover:bg-[#e8e8ea]"
+            }`}
+          >
+            <svg
+              viewBox="0 0 24 24"
+              className="h-5 w-5"
+              fill="currentColor"
+              aria-hidden
+            >
+              {listening ? (
+                <rect x="7" y="7" width="10" height="10" rx="2" />
+              ) : (
+                <>
+                  <path d="M12 14a3 3 0 0 0 3-3V7a3 3 0 1 0-6 0v4a3 3 0 0 0 3 3Z" />
+                  <path d="M19 11a1 1 0 1 0-2 0 5 5 0 0 1-10 0 1 1 0 1 0-2 0 7 7 0 0 0 6 6.93V21a1 1 0 1 0 2 0v-3.07A7 7 0 0 0 19 11Z" />
+                </>
+              )}
+            </svg>
+          </button>
           <input
             ref={inputRef}
             type="text"
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder="지출 입력 또는 질문…"
-            disabled={sending}
-            className="min-h-11 flex-1 bg-transparent px-3 text-[16px] text-foreground outline-none placeholder:text-muted/60 disabled:opacity-60 sm:text-[15px]"
+            placeholder={listening ? "듣고 있어요…" : "지출 입력 또는 질문…"}
+            disabled={sending || listening}
+            className="min-h-11 flex-1 bg-transparent px-2 text-[16px] text-foreground outline-none placeholder:text-muted/60 disabled:opacity-60 sm:text-[15px]"
           />
           <button
             type="submit"
-            disabled={sending || !input.trim()}
+            disabled={sending || listening || !input.trim()}
             className="flex h-11 min-w-11 shrink-0 items-center justify-center rounded-full bg-accent px-4 text-[14px] font-semibold text-white transition-colors hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-40"
           >
             전송
