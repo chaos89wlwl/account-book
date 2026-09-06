@@ -15,8 +15,8 @@ const outfit = Outfit({
 });
 
 export const metadata: Metadata = {
-  title: "나의 스마트 가계부",
-  description: "날짜, 금액, 내용으로 지출을 기록하는 간단한 가계부",
+  title: "AI 가계부 챗봇",
+  description: "대화로 지출을 기록하는 AI 가계부 챗봇",
 };
 
 export const viewport = {
@@ -31,7 +31,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       lang="ko"
       className={`${notoSansKr.variable} ${outfit.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col font-sans">{children}</body>
+      <body className="min-h-full flex flex-col font-sans overflow-hidden">{children}</body>
     </html>
   );
 }
