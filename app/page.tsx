@@ -7,6 +7,7 @@ type ChatMessage = {
   id: string;
   role: "user" | "assistant";
   content: string;
+  imageUrl?: string;
 };
 
 type SpeechRecognitionResultLike = {
@@ -47,6 +48,34 @@ function getSpeechRecognition(): SpeechRecognitionConstructor | null {
   return w.SpeechRecognition ?? w.webkitSpeechRecognition ?? null;
 }
 
+async function compressImage(file: File): Promise<{ base64: string; mimeType: string; previewUrl: string }> {
+  const previewUrl = URL.createObjectURL(file);
+  const bitmap = await createImageBitmap(file);
+  const maxWidth = 1600;
+  const scale = Math.min(1, maxWidth / bitmap.width);
+  const width = Math.max(1, Math.round(bitmap.width * scale));
+  const height = Math.max(1, Math.round(bitmap.height * scale));
+
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) {
+    throw new Error("이미지를 처리할 수 없어요.");
+  }
+  ctx.drawImage(bitmap, 0, 0, width, height);
+  bitmap.close();
+
+  const mimeType = file.type === "image/png" ? "image/png" : "image/jpeg";
+  const dataUrl = canvas.toDataURL(mimeType, 0.85);
+  const base64 = dataUrl.split(",")[1] ?? "";
+  if (!base64) {
+    throw new Error("이미지 변환에 실패했어요.");
+  }
+
+  return { base64, mimeType, previewUrl };
+}
+
 export default function Home() {
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [expensesReady, setExpensesReady] = useState(false);
@@ -55,15 +84,17 @@ export default function Home() {
       id: "welcome",
       role: "assistant",
       content:
-        "안녕하세요! 지출을 기록하거나 통계를 물어보세요.\n예: 오늘 점심 12,000원\n예: 이번 달 총 지출이 얼마야?\n마이크 버튼으로 말로도 입력할 수 있어요.",
+        "안녕하세요! 지출을 기록하거나 통계를 물어보세요.\n예: 오늘 점심 12,000원\n예: 이번 달 총 지출이 얼마야?\n마이크나 영수증 사진으로도 입력할 수 있어요.",
     },
   ]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [listening, setListening] = useState(false);
+  const [analyzingReceipt, setAnalyzingReceipt] = useState(false);
   const [speechSupported, setSpeechSupported] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const sendingRef = useRef(false);
   const messagesRef = useRef(messages);
@@ -96,7 +127,7 @@ export default function Home() {
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, sending, listening]);
+  }, [messages, sending, listening, analyzingReceipt]);
 
   useEffect(() => {
     return () => {
@@ -277,6 +308,81 @@ export default function Home() {
     }
   }
 
+  async function handleReceiptUpload(file: File | undefined) {
+    if (!file || sendingRef.current || analyzingReceipt || listening) return;
+
+    if (!file.type.startsWith("image/")) {
+      pushSystemNotice("이미지 파일만 업로드할 수 있어요.");
+      return;
+    }
+
+    setAnalyzingReceipt(true);
+    let previewUrl = "";
+
+    try {
+      const compressed = await compressImage(file);
+      previewUrl = compressed.previewUrl;
+
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: crypto.randomUUID(),
+          role: "user",
+          content: "영수증 사진을 올렸어요",
+          imageUrl: previewUrl,
+        },
+      ]);
+
+      const res = await fetch("/api/receipt", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          imageBase64: compressed.base64,
+          mimeType: compressed.mimeType,
+        }),
+      });
+
+      const data = (await res.json()) as {
+        reply?: string;
+        expense?: Expense | null;
+        error?: string;
+      };
+
+      if (!res.ok) {
+        throw new Error(data.error || "영수증 분석에 실패했습니다.");
+      }
+
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content: data.reply || "영수증을 확인했어요.",
+        },
+      ]);
+
+      if (data.expense) {
+        setExpenses((prev) => [
+          data.expense as Expense,
+          ...prev.filter((e) => e.id !== data.expense!.id),
+        ]);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "오류가 발생했습니다.";
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content: `죄송해요. ${message}`,
+        },
+      ]);
+    } finally {
+      setAnalyzingReceipt(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  }
+
   return (
     <div className="flex h-dvh flex-col bg-[#f5f5f7]">
       <header className="shrink-0 border-b border-black/5 bg-white/90 px-4 py-3.5 backdrop-blur-md sm:px-6">
@@ -347,6 +453,14 @@ export default function Home() {
                       : "rounded-bl-md bg-white text-foreground"
                   }`}
                 >
+                  {msg.imageUrl ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                      src={msg.imageUrl}
+                      alt="업로드한 영수증"
+                      className="mb-2 max-h-48 w-full rounded-xl object-cover"
+                    />
+                  ) : null}
                   {msg.content}
                 </div>
               </div>
@@ -359,6 +473,17 @@ export default function Home() {
                 </div>
                 <div className="rounded-2xl rounded-bl-md bg-white px-4 py-3 text-[14px] text-muted">
                   듣고 있어요… 말씀해 주세요
+                </div>
+              </div>
+            ) : null}
+
+            {analyzingReceipt ? (
+              <div className="flex justify-start">
+                <div className="mr-2 mt-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-accent text-[11px] font-semibold text-white">
+                  AI
+                </div>
+                <div className="rounded-2xl rounded-bl-md bg-white px-4 py-3 text-[14px] text-muted">
+                  영수증 분석 중…
                 </div>
               </div>
             ) : null}
@@ -382,11 +507,31 @@ export default function Home() {
         onSubmit={handleSend}
         className="mx-auto w-full max-w-xl shrink-0 px-3 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:px-4"
       >
-        <div className="flex items-center gap-2 rounded-full bg-white px-2 py-2 shadow-[0_1px_0_rgba(0,0,0,0.04)]">
+        <div className="flex items-center gap-1.5 rounded-full bg-white px-2 py-2 shadow-[0_1px_0_rgba(0,0,0,0.04)] sm:gap-2">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            capture="environment"
+            className="hidden"
+            onChange={(e) => void handleReceiptUpload(e.target.files?.[0])}
+          />
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={sending || listening || analyzingReceipt}
+            aria-label="영수증 사진 업로드"
+            title="영수증 사진 업로드"
+            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-surface text-foreground transition-colors hover:bg-[#e8e8ea] disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <svg viewBox="0 0 24 24" className="h-5 w-5" fill="currentColor" aria-hidden>
+              <path d="M4 5a2 2 0 0 1 2-2h3.2l1.2 1.6H18a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5Zm8 3a4 4 0 1 0 0 8 4 4 0 0 0 0-8Zm0 2a2 2 0 1 1 0 4 2 2 0 0 1 0-4Z" />
+            </svg>
+          </button>
           <button
             type="button"
             onClick={toggleListening}
-            disabled={sending || !speechSupported}
+            disabled={sending || analyzingReceipt || !speechSupported}
             aria-pressed={listening}
             aria-label={listening ? "음성 인식 중지" : "음성 인식 시작"}
             title={
@@ -423,13 +568,19 @@ export default function Home() {
             type="text"
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder={listening ? "듣고 있어요…" : "지출 입력 또는 질문…"}
-            disabled={sending || listening}
+            placeholder={
+              analyzingReceipt
+                ? "영수증 분석 중…"
+                : listening
+                  ? "듣고 있어요…"
+                  : "지출 입력 또는 질문…"
+            }
+            disabled={sending || listening || analyzingReceipt}
             className="min-h-11 flex-1 bg-transparent px-2 text-[16px] text-foreground outline-none placeholder:text-muted/60 disabled:opacity-60 sm:text-[15px]"
           />
           <button
             type="submit"
-            disabled={sending || listening || !input.trim()}
+            disabled={sending || listening || analyzingReceipt || !input.trim()}
             className="flex h-11 min-w-11 shrink-0 items-center justify-center rounded-full bg-accent px-4 text-[14px] font-semibold text-white transition-colors hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-40"
           >
             전송
