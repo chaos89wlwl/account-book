@@ -94,7 +94,7 @@ export default function Home() {
       <main className="mx-auto flex w-full max-w-md flex-1 flex-col px-5 py-12 sm:max-w-lg sm:px-8 sm:py-20">
         <header className="mb-12 sm:mb-16">
           <h1 className="text-[28px] font-semibold tracking-tight text-foreground sm:text-[32px]">
-            나의 AI 가계부
+            나의 스마트 가계부
           </h1>
           <p className="mt-2 text-[15px] leading-relaxed text-muted sm:text-sm">
             지출을 간단히 기록하세요.
