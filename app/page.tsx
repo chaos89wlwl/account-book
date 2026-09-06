@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, useEffect, useRef, useState } from "react";
+import { ExpenseCharts } from "@/components/ExpenseCharts";
 import { Expense, supabase } from "@/lib/supabase";
 
 type ChatMessage = {
@@ -396,7 +397,7 @@ export default function Home() {
         </div>
       </header>
 
-      <div className="mx-auto flex w-full max-w-xl shrink-0 flex-col gap-2 px-3 pt-3 sm:px-4">
+      <div className="mx-auto flex max-h-[42vh] w-full max-w-xl shrink-0 flex-col gap-2 overflow-y-auto px-3 pt-3 sm:max-h-[38vh] sm:px-4">
         <p className="px-1 text-[12px] font-medium text-muted">저장된 지출</p>
         <div className="scrollbar-thin flex gap-2 overflow-x-auto pb-1 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
           {!expensesReady ? (
@@ -431,6 +432,7 @@ export default function Home() {
             ))
           )}
         </div>
+        {expensesReady && expenses.length > 0 ? <ExpenseCharts expenses={expenses} /> : null}
       </div>
 
       <div className="mx-auto flex min-h-0 w-full max-w-xl flex-1 flex-col px-3 sm:px-4">
